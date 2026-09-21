@@ -1,0 +1,17 @@
+weread-mcp
+==========
+
+本项目把腾讯官方 WeChatReading Skills 转换为 MCP（Model Context Protocol）Server。
+
+`src/weread_mcp/skills/` 目录下的 Markdown 能力文档原样来自：
+
+    https://github.com/Tencent/WeChatReading
+    Copyright (c) 2026 Tencent
+    Licensed under the Apache License, Version 2.0
+
+这些文档在本项目中作为 MCP 资源（`weread://skills/...`）提供，内容未作修改。
+Apache-2.0 协议全文见 https://www.apache.org/licenses/LICENSE-2.0
+
+本项目其余代码同样以 Apache-2.0 协议发布。
+
+微信读书接口与 API Key 的使用须遵守微信读书的服务条款；本项目与腾讯官方无从属关系。
