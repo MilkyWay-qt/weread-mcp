@@ -170,6 +170,109 @@ claude mcp add --transport sse weread http://127.0.0.1:8000/sse
 监听 `127.0.0.1` 时 SDK 会自动开启 DNS rebinding 防护；对外暴露（`--host 0.0.0.0`）时请自行放在
 反向代理/鉴权网关后面，并用 `/healthz` 做健康检查。
 
+## 部署为 HTTPS 远程服务（Notion 等云端 Agent）
+
+Notion 自定义 Agent 这类云端客户端，是从**它们自己的服务器**来连你的 MCP，所以需要一个公网可访问的 HTTPS 地址。
+部署后的安全模型：
+
+```
+Notion ──HTTPS + 访问令牌──▶ 反向代理 / 隧道 ──▶ weread-mcp ──WEREAD_API_KEY──▶ 微信读书网关
+```
+
+- **微信读书 API Key 只存在于服务端**（环境变量或云平台 Secrets），不会发给客户端，也不会出现在任何工具的返回结果里。
+- **客户端拿到的是另一枚「访问令牌」**，与微信读书 Key 完全无关。万一泄露，换一枚即可，微信读书 Key 不受影响。
+- 没有访问令牌的请求一律返回 `401`；`/healthz` 保持公开，方便做健康检查。
+
+### 1. 生成访问令牌
+
+```bash
+openssl rand -hex 32
+```
+
+### 2. 启动服务（推荐 Streamable HTTP）
+
+```bash
+export WEREAD_MCP_AUTH_TOKEN=<上一步生成的令牌>
+export WEREAD_ALLOW_CLIENT_API_KEY=false        # 单人使用时关闭，只用服务端的 Key
+uv run weread-mcp --transport streamable-http --host 127.0.0.1 --port 8000 \
+  --allowed-host weread.example.com
+```
+
+`--allowed-host` 填对外的域名。服务监听 `127.0.0.1` 时，SDK 默认只接受 `Host: localhost`，
+经反向代理或隧道转发来的请求带的是公网域名，不加这一项会被 `421 Invalid Host header` 拒绝。
+
+### 3. 提供 HTTPS（三选一）
+
+| 方式 | 适合 | 要点 |
+|------|------|------|
+| Cloudflare Tunnel | 不想买服务器，电脑常开 | 需要一个托管在 Cloudflare 的域名，免费 |
+| VPS + Caddy | 长期稳定运行 | Caddy 自动申请和续期证书 |
+| 云平台（Render / Railway / Fly.io 等） | 免运维 | 平台自带 HTTPS，Key 和令牌放进平台的 Secrets |
+
+**Cloudflare Tunnel**
+
+```bash
+brew install cloudflared
+cloudflared tunnel login
+cloudflared tunnel create weread
+cloudflared tunnel route dns weread weread.example.com
+```
+
+`~/.cloudflared/config.yml`：
+
+```yaml
+tunnel: weread
+credentials-file: /Users/<你>/.cloudflared/<TUNNEL-UUID>.json
+ingress:
+  - hostname: weread.example.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404
+```
+
+```bash
+cloudflared tunnel run weread
+```
+
+只想临时试一下，可以用 `cloudflared tunnel --url http://127.0.0.1:8000`，它会分配一个随机的
+`*.trycloudflare.com` 地址。此时 `--allowed-host` 要填这个随机域名，而且每次重启都会变。
+
+**VPS + Caddy**（`/etc/caddy/Caddyfile`）
+
+```
+weread.example.com {
+    reverse_proxy 127.0.0.1:8000
+}
+```
+
+**云平台**：启动命令用 `uv run weread-mcp --transport streamable-http --host 0.0.0.0 --port $PORT`，
+在平台的环境变量 / Secrets 里设置 `WEREAD_API_KEY` 和 `WEREAD_MCP_AUTH_TOKEN`。
+监听 `0.0.0.0` 时 SDK 不做 Host 校验，可以不配 `--allowed-host`。
+
+### 4. 验证
+
+```bash
+curl https://weread.example.com/healthz                  # 200，且 "auth_required": true
+curl -X POST https://weread.example.com/mcp -i | head -1  # 不带令牌：401
+```
+
+### 5. 在 Notion 中添加
+
+1. 需要 Notion Business / Enterprise 套餐，且工作区管理员已开启「自定义 MCP 服务器」
+2. 打开自定义 Agent → Settings → Tools & Access → Add connection → Custom MCP server
+3. URL 填 `https://weread.example.com/mcp`
+4. 认证选择请求头方式：`Authorization: Bearer <访问令牌>`（或 `X-API-Key: <访问令牌>`）
+
+其他支持「URL + 自定义请求头」的云端客户端配置方法相同。
+Claude 网页版的自定义连接器目前只支持 OAuth，不能填写请求头，所以不适用这种令牌方式；
+在 Claude 里建议继续用本地 stdio。
+
+### 安全清单
+
+- 访问令牌只放在请求头里，**不要拼进 URL**，否则会被写进各级访问日志
+- `WEREAD_MCP_AUTH_TOKEN` 和 `WEREAD_API_KEY` 都不要提交进 git（`.env` 已在 `.gitignore` 中）
+- 需要吊销访问时，改掉 `WEREAD_MCP_AUTH_TOKEN` 并重启服务即可
+- 本服务的全部工具都是只读的，不会修改你的书架或笔记
+
 ## 多用户部署：Key 由客户端携带
 
 服务端不配 `WEREAD_API_KEY` 时，每个客户端用请求头带自己的 Key：
@@ -179,6 +282,9 @@ Authorization: Bearer wrk-xxxxxxxx
 # 或
 X-WeRead-Api-Key: wrk-xxxxxxxx
 ```
+
+启用了访问令牌（`WEREAD_MCP_AUTH_TOKEN`）时，`Authorization` 头用于承载访问令牌，
+此时只能用 `X-WeRead-Api-Key` 携带微信读书 Key。
 
 请求头优先级高于服务端环境变量。不想让客户端覆盖时设 `WEREAD_ALLOW_CLIENT_API_KEY=false`。
 
@@ -197,6 +303,8 @@ X-WeRead-Api-Key: wrk-xxxxxxxx
 | `WEREAD_SKILL_VERSION` | `1.0.4` | 上报给网关的 skill 版本 |
 | `WEREAD_REQUEST_TIMEOUT` | `30` | 网关请求超时（秒） |
 | `WEREAD_MCP_LOG_LEVEL` | `INFO` | 日志级别 |
+| `WEREAD_MCP_AUTH_TOKEN` | — | MCP 访问令牌，公网部署必设（至少 16 位） |
+| `WEREAD_MCP_ALLOWED_HOSTS` | — | 反向代理 / 隧道对外的域名，逗号分隔 |
 
 ## 项目结构
 
@@ -204,6 +312,7 @@ X-WeRead-Api-Key: wrk-xxxxxxxx
 src/weread_mcp/
 ├── cli.py        # 命令行入口与传输选择
 ├── config.py     # 环境变量 / 参数配置
+├── http_app.py   # HTTP 传输组装：访问令牌鉴权、Host 白名单
 ├── gateway.py    # Agent API Gateway 客户端（鉴权、参数平铺、错误归一化）
 ├── server.py     # MCPServer 构造、lifespan、instructions、/healthz
 ├── tools.py      # 19 个工具，docstring 即模型看到的口径说明
@@ -213,6 +322,7 @@ tests/
 ├── test_gateway.py  # 参数平铺、errcode、Key 处理
 ├── test_tools.py    # 内存 MCP 客户端跑通全部工具与口径计算
 ├── test_sse.py      # 真起 uvicorn，用 MCP 客户端通过 URL 连接
+├── test_remote.py   # 公网部署：令牌鉴权、Host 白名单、令牌与微信读书 Key 隔离
 └── test_cli.py      # 参数覆盖
 ```
 

@@ -54,14 +54,19 @@ def _header(headers: Mapping[str, str] | None, name: str) -> str | None:
 
 
 def _resolve_api_key(ctx: Context[AppState]) -> str | None:
-    """优先使用客户端请求头里的 Key，其次用服务端环境变量里的 Key。"""
+    """优先使用客户端请求头里的 Key，其次用服务端环境变量里的 Key。
+
+    启用了 MCP 访问令牌（`auth_token`）时，`Authorization` 头承载的是访问令牌，
+    绝不能当成微信读书 Key 转发出去，此时只认 `X-WeRead-Api-Key`。
+    """
     state = _state(ctx)
     if state.settings.allow_client_api_key:
-        authorization = _header(ctx.headers, "Authorization")
-        if authorization and authorization.lower().startswith("bearer "):
-            candidate = authorization[7:].strip()
-            if candidate:
-                return candidate
+        if not state.settings.auth_token:
+            authorization = _header(ctx.headers, "Authorization")
+            if authorization and authorization.lower().startswith("bearer "):
+                candidate = authorization[7:].strip()
+                if candidate:
+                    return candidate
         candidate = _header(ctx.headers, "X-WeRead-Api-Key")
         if candidate:
             return candidate

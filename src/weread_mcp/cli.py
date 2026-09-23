@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Sequence
 
 from . import __version__
-from .config import Settings
+from .config import Settings, validate_auth_token
 
 logger = logging.getLogger("weread_mcp")
 
@@ -67,6 +67,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--api-key", help="微信读书 API Key，优先级高于 WEREAD_API_KEY")
     parser.add_argument(
+        "--auth-token",
+        help="MCP 访问令牌（公网部署必设），客户端需带 Authorization: Bearer <token>；"
+        "等价于 WEREAD_MCP_AUTH_TOKEN",
+    )
+    parser.add_argument(
+        "--allowed-host",
+        action="append",
+        metavar="DOMAIN",
+        help="反向代理/隧道对外的域名，可重复；等价于 WEREAD_MCP_ALLOWED_HOSTS（逗号分隔）",
+    )
+    parser.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="日志级别，默认 INFO",
@@ -99,6 +110,10 @@ def settings_from_args(argv: Sequence[str] | None = None) -> Settings:
         overrides["api_key"] = args.api_key
     if args.log_level:
         overrides["log_level"] = args.log_level
+    if args.auth_token:
+        overrides["auth_token"] = validate_auth_token(args.auth_token)
+    if args.allowed_host:
+        overrides["allowed_hosts"] = tuple(h.strip() for h in args.allowed_host if h.strip())
 
     return dataclasses.replace(settings, **overrides)  # type: ignore[arg-type]
 
@@ -125,28 +140,31 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"weread-mcp {__version__} · transport={settings.transport}\n"
         f"  MCP endpoint : {endpoint}\n"
         f"  health check : {base}/healthz\n"
-        f"  API Key      : {'已配置（服务端）' if settings.api_key else '未配置，需由客户端请求头携带'}",
+        f"  API Key      : {'已配置（服务端）' if settings.api_key else '未配置，需由客户端请求头携带'}\n"
+        f"  访问令牌     : {'已启用' if settings.auth_token else '未启用'}"
+        + (f"\n  允许的域名   : {', '.join(settings.allowed_hosts)}" if settings.allowed_hosts else ""),
         file=sys.stderr,
         flush=True,
     )
+    publicly_reachable = settings.host not in ("127.0.0.1", "localhost", "::1") or bool(settings.allowed_hosts)
+    if not settings.auth_token and publicly_reachable:
+        print(
+            "  ⚠️  正在监听非本机地址但未设置访问令牌：任何能访问该端口的人都能读取你的微信读书数据。\n"
+            "      请设置 WEREAD_MCP_AUTH_TOKEN（或 --auth-token）。",
+            file=sys.stderr,
+            flush=True,
+        )
 
-    if settings.transport == "sse":
-        server.run(
-            transport="sse",
-            host=settings.host,
-            port=settings.port,
-            sse_path=settings.sse_path,
-            message_path=settings.message_path,
-        )
-    else:
-        server.run(
-            transport="streamable-http",
-            host=settings.host,
-            port=settings.port,
-            streamable_http_path=settings.streamable_http_path,
-            json_response=settings.json_response,
-            stateless_http=settings.stateless_http,
-        )
+    import uvicorn
+
+    from .http_app import build_http_app
+
+    uvicorn.run(
+        build_http_app(server, settings),
+        host=settings.host,
+        port=settings.port,
+        log_level=settings.log_level.lower(),
+    )
     return 0
 
 

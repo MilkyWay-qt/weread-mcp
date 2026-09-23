@@ -130,5 +130,6 @@ def _register_health_route(server: MCPServer[AppState], settings: Settings) -> N
                 "transport": settings.transport,
                 "skill_version": settings.skill_version,
                 "server_api_key_configured": bool(settings.api_key),
+                "auth_required": bool(settings.auth_token),
             }
         )
